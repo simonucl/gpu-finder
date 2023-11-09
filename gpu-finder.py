@@ -24,12 +24,18 @@ For more information, see the README.md under /compute.
 import time
 import json
 import googleapiclient.discovery
+from tqdm import tqdm
 
 def check_gpu_config(config):
     compute_config = config
     if compute_config['instance_config']['machine_type'].startswith('a2'):
         number_of_gpus_requested = compute_config['instance_config']['number_of_gpus']
-        gpus_in_machine_type = compute_config['instance_config']['machine_type'][(compute_config['instance_config']['machine_type'].find('highgpu')+8):(len(compute_config['instance_config']['machine_type'])-1)]
+        # When requested gpu is A100-40GB
+        if 'highgpu' in compute_config['instance_config']['machine_type']:
+            gpus_in_machine_type = compute_config['instance_config']['machine_type'][(compute_config['instance_config']['machine_type'].find('highgpu')+8):(len(compute_config['instance_config']['machine_type'])-1)]
+        # When requested gpu is A100-80GB
+        elif 'ultragpu' in compute_config['instance_config']['machine_type']:
+            gpus_in_machine_type = compute_config['instance_config']['machine_type'][(compute_config['instance_config']['machine_type'].find('ultragpu')+9):(len(compute_config['instance_config']['machine_type'])-1)]
         if number_of_gpus_requested != int(gpus_in_machine_type):
             raise Exception("Please match the number of GPUs parameter with the correct machine type in the config file")
 
@@ -118,13 +124,14 @@ def create_instance(compute, project, config, zone_list):
     instances = 0
     regions_attempted = 0
     print(f"There are {len(regions_to_try)} regions to try that match the GPU type and machine type configuration.")
-    for region in regions_to_try:
+    for region in tqdm(regions_to_try):
         print(f"Attempting to create instances in {region}")
         zones = [z for z in zone_list if z['region'] == region]
         print(f"There are {len(zones)} zones to try in {region}")
         zones_attempted = 0
         move_regions = 0
         for i in range(len(zones)):
+            print(f"Finding available zone in {region}")
             zone_config = zones[i]
             for j in range(compute_config['number_of_instances']):
                 print(f"Creating instance number {instances+1} of {compute_config['number_of_instances']} in {zone_config['zone']}, zone {zones_attempted+1} out of {len(zones)} attempted.")
@@ -164,7 +171,7 @@ def create_instance(compute, project, config, zone_list):
                             "diskEncryptionKey": {}
                         }
                     ],
-                    'canIpForward': False,
+                    'canIpForward': True,
                     'guestAccelerators': [
                         {
                             'acceleratorCount': compute_config['instance_config']['number_of_gpus'],
@@ -337,13 +344,26 @@ def main(gpu_config, wait=True):
     available_zones = check_machine_type_and_accelerator(compute, gpu_config["project_id"], gpu_config["instance_config"]["machine_type"], gpu_config["instance_config"]["gpu_type"], compute_zones)
     accelerators = get_accelerator_quota(compute, gpu_config["project_id"], gpu_config, available_zones, gpu_config["instance_config"]["number_of_gpus"])
     available_regions = list({v['region'] for v in available_zones})
+    number_of_instances = gpu_config["number_of_instances"]
+    instances_created = []
     if available_regions:
         print(f"Machine type {gpu_config['instance_config']['machine_type']} is available in the following regions: {available_regions}")
-        instance_details = create_instance(compute, gpu_config["project_id"], gpu_config, accelerators)
-        if wait:
-            print("hit enter to delete instances")
-            input()
-        delete_instance(compute, gpu_config["project_id"], instance_details)
+        while True:
+            print("Start creating instances")
+            instance_details = create_instance(compute, gpu_config["project_id"], gpu_config, accelerators)
+            instances_created.extend(instance_details)
+            if len(instances_created) >= number_of_instances:
+                print(f"Created {len(instances_created)} instances")
+                for i in range(len(instance_details)):
+                    print(f"Instance {i+1} name: {instance_details[i]['name']}, zone: {instance_details[i]['zone']}")
+                break
+            else:
+                print("Not all instances were created, trying again in 5 minutes")
+                time.sleep(300)
+        # if wait:
+        #     print("hit enter to delete instances")
+        #     input()
+        # delete_instance(compute, gpu_config["project_id"], instance_details)
     else:
         print(f"No regions available with the instance configuration {gpu_config['instance_config']['machine_type']} machine type and {gpu_config['instance_config']['gpu_type']} GPU type")
 
